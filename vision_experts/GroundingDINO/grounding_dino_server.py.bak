@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from __future__ import annotations
+
+import argparse
+import sys
+import traceback
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+import gradio as gr
+import numpy as np
+import torch
+import torch.nn.functional as F
+from PIL import Image
+
+try:
+    import cv2  # type: ignore
+except Exception:
+    cv2 = None  # type: ignore
+try:
+    import supervision as sv  # type: ignore
+except Exception:
+    sv = None  # type: ignore
+try:
+    from torchvision.ops import box_convert  # type: ignore
+except Exception:
+    box_convert = None  # type: ignore
+
+
+REPO_DIR = Path(__file__).resolve().parent
+if str(REPO_DIR) not in sys.path:
+    sys.path.insert(0, str(REPO_DIR))
+
+CONFIG_PATH = REPO_DIR / "groundingdino" / "config" / "GroundingDINO_SwinT_OGC.py"
+WEIGHTS_PATH = REPO_DIR / "weights" / "groundingdino_swint_ogc.pth"
+
+
+def _ms_deform_attn_core_pytorch(
+    value: torch.Tensor,
+    spatial_shapes: torch.Tensor,
+    sampling_locations: torch.Tensor,
+    attention_weights: torch.Tensor,
+) -> torch.Tensor:
+    N, S, M, D = value.shape
+    _, Lq, M2, L, P, _ = sampling_locations.shape
+    assert M2 == M
+
+    spatial_shapes_list = spatial_shapes.tolist()
+    split_sizes = [int(h * w) for h, w in spatial_shapes_list]
+    value_list = value.split(split_sizes, dim=1)
+
+    sampling_grids = sampling_locations * 2 - 1  # to [-1,1]
+    sampling_value_list: List[torch.Tensor] = []
+
+    for lid, (H, W) in enumerate(spatial_shapes_list):
+        v = value_list[lid].flatten(2).transpose(1, 2).reshape(N * M, D, H, W)
+        grid = sampling_grids[:, :, :, lid].transpose(1, 2).flatten(0, 1)  # (N*M, Lq, P, 2)
+
+        sampled = F.grid_sample(
+            v,
+            grid,
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=False,
+        )
+        sampling_value_list.append(sampled)
+
+    attn = attention_weights.transpose(1, 2).reshape(N * M, 1, Lq, L * P)
+    sampled_all = torch.stack(sampling_value_list, dim=-2).flatten(-2)
+    out = (sampled_all * attn).sum(-1)
+    out = out.view(N, M * D, Lq).transpose(1, 2).contiguous()
+    return out
+
+
+def patch_groundingdino_ms_deform_attn() -> None:
+    import importlib
+    import builtins
+
+    if not hasattr(builtins, "_C"):
+        builtins._C = None  # type: ignore[attr-defined]
+
+    class _MSDeformAttnFunction_PyTorch(torch.autograd.Function):
+        @staticmethod
+        def forward(  # type: ignore[override]
+            ctx,
+            value: torch.Tensor,
+            spatial_shapes: torch.Tensor,
+            level_start_index: torch.Tensor,
+            sampling_locations: torch.Tensor,
+            attention_weights: torch.Tensor,
+            im2col_step: int = 64,
+        ) -> torch.Tensor:
+            return _ms_deform_attn_core_pytorch(value, spatial_shapes, sampling_locations, attention_weights)
+
+        @staticmethod
+        def backward(ctx, *grad_outputs):  # type: ignore[override]
+            raise RuntimeError("Fallback is inference-only.")
+
+    candidates = [
+        "groundingdino.models.GroundingDINO.ops.functions.ms_deform_attn_func",
+        "groundingdino.models.GroundingDINO.ops.functions.ms_deform_attn",
+        "groundingdino.models.GroundingDINO.ops.modules.ms_deform_attn",
+    ]
+
+    for name in candidates:
+        try:
+            mod = importlib.import_module(name)
+        except Exception:
+            continue
+        if "_C" not in mod.__dict__:
+            mod.__dict__["_C"] = None
+        if hasattr(mod, "MSDeformAttnFunction"):
+            setattr(mod, "MSDeformAttnFunction", _MSDeformAttnFunction_PyTorch)
+        if hasattr(mod, "ms_deform_attn_core_pytorch"):
+            setattr(mod, "ms_deform_attn_core_pytorch", _ms_deform_attn_core_pytorch)
+        if hasattr(mod, "ms_deform_attn_core"):
+            setattr(mod, "ms_deform_attn_core", _ms_deform_attn_core_pytorch)
+
+
+_MODEL = None
+
+
+def get_model():
+    global _MODEL
+    if _MODEL is not None:
+        return _MODEL
+
+    patch_groundingdino_ms_deform_attn()
+
+    from groundingdino.util.inference import load_model
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    _MODEL = load_model(str(CONFIG_PATH), str(WEIGHTS_PATH), device=device)
+    _MODEL.eval()
+
+    patch_groundingdino_ms_deform_attn()
+    return _MODEL
+
+
+def _annotate(image_rgb: np.ndarray, boxes_cxcywh_01: torch.Tensor, logits: torch.Tensor, phrases: List[str]) -> np.ndarray:
+    if cv2 is None or sv is None or box_convert is None:
+        return image_rgb
+
+    h, w, _ = image_rgb.shape
+    boxes = boxes_cxcywh_01 * torch.tensor([w, h, w, h], device=boxes_cxcywh_01.device)
+    xyxy = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").detach().cpu().numpy()
+
+    det = sv.Detections(xyxy=xyxy)
+    labels = [f"{p} {float(s):.3f}" for p, s in zip(phrases, logits.detach().cpu().tolist())]
+
+    bbox_anno = sv.BoxAnnotator(color_lookup=sv.ColorLookup.INDEX)
+    lbl_anno = sv.LabelAnnotator(color_lookup=sv.ColorLookup.INDEX)
+
+    bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+    bgr = bbox_anno.annotate(scene=bgr, detections=det)
+    bgr = lbl_anno.annotate(scene=bgr, detections=det, labels=labels)
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    return rgb
+
+
+def predict_fn(image_path: str, text: str, box_threshold: float, text_threshold: float):
+    try:
+        from groundingdino.util.inference import load_image, predict
+
+        model = get_model()
+        image_source, image = load_image(image_path)
+
+        boxes, logits, phrases = predict(
+            model=model,
+            image=image,
+            caption=text,
+            box_threshold=float(box_threshold),
+            text_threshold=float(text_threshold),
+        )
+
+        ret: Dict[str, Any] = {
+            "boxes_cxcywh_01": boxes.detach().cpu().tolist(),
+            "logits": logits.detach().cpu().tolist(),
+            "phrases": phrases,
+            "box_threshold": float(box_threshold),
+            "text_threshold": float(text_threshold),
+        }
+
+        if isinstance(image_source, np.ndarray):
+            ann = _annotate(image_source, boxes, logits, phrases)
+            out_img = Image.fromarray(ann)
+        else:
+            out_img = Image.open(image_path).convert("RGB")
+
+        return out_img, ret
+
+    except Exception as e:
+        err = {"error": f"{e.__class__.__name__}: {str(e)}", "traceback": traceback.format_exc()}
+        try:
+            fallback = Image.open(image_path).convert("RGB")
+        except Exception:
+            fallback = None
+        return fallback, err
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=8081)
+    ap.add_argument("--share", action="store_true")
+    args = ap.parse_args()
+
+    iface = gr.Interface(
+        fn=predict_fn,
+        inputs=[
+            gr.Image(type="filepath", label="image"),
+            gr.Textbox(label="text", value="object"),
+            gr.Number(label="box_threshold", value=0.35),
+            gr.Number(label="text_threshold", value=0.25),
+        ],
+        outputs=[
+            gr.Image(type="filepath", label="output_0"),
+            gr.JSON(label="output_1"),
+        ],
+        allow_flagging="never",
+        title="GroundingDINO local (fallback)",
+    )
+
+    iface.launch(server_name=args.host, server_port=args.port, share=args.share)
+
+
+if __name__ == "__main__":
+    main()
