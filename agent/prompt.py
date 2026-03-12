@@ -22,7 +22,140 @@ If you think you get the answer to the intial user request, you can reply with "
 """
 
 
+import json
+import os
 
+
+def _prompt_debug_dump(prompt: str):
+    dump_path = os.environ.get("VSK_PROMPT_DUMP_PATH", "").strip()
+    if dump_path:
+        try:
+            with open(dump_path, "w", encoding="utf-8") as f:
+                f.write(prompt)
+        except Exception:
+            pass
+
+
+def _task_dir_json_dump(filename: str, payload):
+    task_dir = os.environ.get("VSK_TASK_DIR", "").strip()
+    if task_dir:
+        try:
+            os.makedirs(task_dir, exist_ok=True)
+            with open(os.path.join(task_dir, filename), "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+        except Exception:
+            pass
+
+
+def _apply_execution_hook_to_react_prompt(prompt: str, query: str) -> str:
+    hook_mode = os.environ.get("VSK_EXECUTION_HOOK_MODE", "").strip()
+    enable_subtraction_hook = os.environ.get("VSK_ENABLE_SUBTRACTION_HOOK", "1").strip().lower()
+
+    if hook_mode != "set_subtraction_single_pass":
+        _prompt_debug_dump(prompt)
+        return prompt
+
+    if enable_subtraction_hook in {"0", "false", "no", "off"}:
+        _prompt_debug_dump(prompt)
+        _task_dir_json_dump(
+            "execution_hook_applied.json",
+            {
+                "hook_mode": hook_mode,
+                "hook_added": False,
+                "hook_disabled_by_env": True,
+                "query_preview": str(query)[:500],
+                "question_category": "set_counting_or_dedup",
+            },
+        )
+        return prompt
+
+    patch_root = Path(os.environ.get("VSK_PATCH_ROOT", "generated_patches"))
+    hook_file = patch_root / "prompts" / "membership_verification_v1.txt"
+    if hook_file.exists():
+        hook_body = hook_file.read_text(encoding="utf-8").strip()
+    else:
+        hook_body = """[MEMBERSHIP_HOOK_V1]
+
+Apply only to visual subtract/remove/remaining-count questions.
+Otherwise ignore completely.
+
+Required steps:
+1. Enumerate visible objects in stable order.
+2. For each object, decide:
+   - red?
+   - tiny?
+   - matte?
+   - ball?
+3. Mark set membership:
+   - in_red_set
+   - in_tiny_matte_ball_set
+4. removed = union(red_set, tiny_matte_ball_set)
+5. remaining = visible_objects - removed
+
+Rules:
+- Do not remove one object twice.
+- Do not skip object-by-object membership checking.
+- Do not jump directly to the final count.
+- If uncertain, state which attribute is uncertain before deciding.
+
+Output exactly:
+{
+  "objects": [
+    {
+      "name": "...",
+      "red": true/false,
+      "tiny": true/false,
+      "matte": true/false,
+      "ball": true/false,
+      "in_red_set": true/false,
+      "in_tiny_matte_ball_set": true/false,
+      "removed": true/false
+    }
+  ],
+  "visible_count": <int>,
+  "removed_count": <int>,
+  "remaining_count": <int>,
+  "final_answer": <int>
+}"""
+    hook_block = "\n# EXECUTION HOOK: membership_verification_v1\n" + hook_body + "\n"
+
+    prompt = prompt + "\n" + hook_block + "\n"
+    _prompt_debug_dump(prompt)
+    _task_dir_json_dump(
+        "execution_hook_applied.json",
+        {
+            "hook_mode": hook_mode,
+            "hook_added": True,
+            "hook_disabled_by_env": False,
+            "query_preview": str(query)[:500],
+            "question_category": "set_counting_or_dedup",
+        },
+    )
+    return prompt
+
+
+
+
+def _apply_external_prompt_patches(prompt: str) -> str:
+    try:
+        from vsk_patches.loader import load_active_patches, apply_prompt_patches
+        enabled = load_active_patches(os.environ.get("VSK_PATCH_CONFIG", "configs/active_patches.json"))
+        return apply_prompt_patches(
+            prompt,
+            patch_root=os.environ.get("VSK_PATCH_ROOT", "generated_patches"),
+            enabled_prompts=enabled.get("prompts", []),
+        )
+    except Exception as e:
+        _task_dir_json_dump("external_prompt_patch_error.json", {"error": str(e)})
+        return prompt
+
+
+def _finalize_prompt(prompt: str, query: str) -> str:
+    # First append accepted/active external prompt patches, then task-scoped execution hook.
+    prompt = _apply_external_prompt_patches(prompt)
+    prompt = _apply_execution_hook_to_react_prompt(prompt, query)
+    _prompt_debug_dump(prompt)
+    return prompt
 
 class ReACTPrompt:
     
@@ -377,6 +510,7 @@ ANSWER: The third image fits into the black part. TERMINATE
         else:
             prompt += "# USER IMAGE: No image provided.\n"
         prompt += "Now please generate only THOUGHT 0 and ACTION 0 in RESULT. If no action needed, also reply with ANSWER: <your answer> and ends with TERMINATE in the RESULT:\n# RESULT #:\n"
+        prompt = _finalize_prompt(prompt, query)
         return prompt
     
     def get_parsing_feedback(self, error_message: str, error_code: str) -> str:
@@ -850,6 +984,7 @@ ACTION 0:
 ```python
 import matplotlib.pyplot as plt
 import numpy as np
+from pathlib import Path
 
 # Define coordinates
 points = {

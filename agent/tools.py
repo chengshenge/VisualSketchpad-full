@@ -373,3 +373,24 @@ if _os.environ.get("VSK_DEBUG_TOOLS", "0") == "1":
                 pass
             return out
 # ===== END VSK_DEBUG_TOOLS_WRAPPER =====
+
+
+
+# ---- External patch injection (tools) ----
+def _vsk_autoload_external_tool_patches():
+    try:
+        from vsk_patches.loader import load_active_patches, register_tool_patches
+        enabled = load_active_patches(os.environ.get("VSK_PATCH_CONFIG", "configs/active_patches.json"))
+        register_tool_patches(
+            tools_module=sys.modules[__name__],
+            patch_root=os.environ.get("VSK_PATCH_ROOT", "generated_patches"),
+            enabled_tools=enabled.get("tools", []),
+        )
+    except Exception:
+        pass
+
+try:
+    _vsk_autoload_external_tool_patches()
+except Exception:
+    pass
+# ---- End external patch injection ----

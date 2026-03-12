@@ -1,0 +1,4 @@
+# ninja log v7
+0	5295	1772844650136662467	/home/chengshengge/merge/CRADLE2/third_party/VisualSketchpad/vision_experts/simplified_som/ops/build/temp.linux-x86_64-cpython-310/home/chengshengge/merge/CRADLE2/third_party/VisualSketchpad/vision_experts/simplified_som/ops/src/cpu/ms_deform_attn_cpu.o	2a0767ce877b90e6
+1	14441	1772844650140757229	/home/chengshengge/merge/CRADLE2/third_party/VisualSketchpad/vision_experts/simplified_som/ops/build/temp.linux-x86_64-cpython-310/home/chengshengge/merge/CRADLE2/third_party/VisualSketchpad/vision_experts/simplified_som/ops/src/vision.o	cccbbe22dbc6898c
+1	18143	1772844650140757229	/home/chengshengge/merge/CRADLE2/third_party/VisualSketchpad/vision_experts/simplified_som/ops/build/temp.linux-x86_64-cpython-310/home/chengshengge/merge/CRADLE2/third_party/VisualSketchpad/vision_experts/simplified_som/ops/src/cuda/ms_deform_attn_cuda.o	e3edbfea16b5e35b

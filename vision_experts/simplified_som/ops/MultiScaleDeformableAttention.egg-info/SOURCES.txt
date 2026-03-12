@@ -1,10 +1,7 @@
 setup.py
-/mmfs1/gscratch/ark/yushihu/sketchpad/SoM/ops/src/vision.cpp
-/mmfs1/gscratch/ark/yushihu/sketchpad/SoM/ops/src/cpu/ms_deform_attn_cpu.cpp
-/mmfs1/gscratch/ark/yushihu/sketchpad/SoM/ops/src/cuda/ms_deform_attn_cuda.cu
-/mmfs1/gscratch/ark/yushihu/sketchpad_old/simplified_som/ops/src/vision.cpp
-/mmfs1/gscratch/ark/yushihu/sketchpad_old/simplified_som/ops/src/cpu/ms_deform_attn_cpu.cpp
-/mmfs1/gscratch/ark/yushihu/sketchpad_old/simplified_som/ops/src/cuda/ms_deform_attn_cuda.cu
+/home/chengshengge/merge/CRADLE2/third_party/VisualSketchpad/vision_experts/simplified_som/ops/src/vision.cpp
+/home/chengshengge/merge/CRADLE2/third_party/VisualSketchpad/vision_experts/simplified_som/ops/src/cpu/ms_deform_attn_cpu.cpp
+/home/chengshengge/merge/CRADLE2/third_party/VisualSketchpad/vision_experts/simplified_som/ops/src/cuda/ms_deform_attn_cuda.cu
 MultiScaleDeformableAttention.egg-info/PKG-INFO
 MultiScaleDeformableAttention.egg-info/SOURCES.txt
 MultiScaleDeformableAttention.egg-info/dependency_links.txt
